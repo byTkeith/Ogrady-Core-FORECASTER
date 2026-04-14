@@ -11,11 +11,16 @@ app.use(express.json());
 
 // Health check for Vercel deployment verification
 app.get("/api/health", (req, res) => {
+  console.log("Health check requested");
   res.json({ status: "ok", timestamp: new Date().toISOString(), environment: process.env.NODE_ENV });
 });
 
 // Helper to fetch JSON safely and handle HTML error pages
 const fetchJson = async (url: string, options: any) => {
+  console.log('Fetching URL:', url);
+  // Avoid logging the full options if it contains sensitive API keys, but log the structure
+  console.log('Fetch method:', options.method);
+  
   try {
     const response = await fetch(url, {
       ...options,
@@ -27,6 +32,9 @@ const fetchJson = async (url: string, options: any) => {
       timeout: 15000 // 15s timeout to stay within Vercel limits
     });
 
+    console.log('Response status:', response.status);
+    console.log('Response headers:', JSON.stringify(Object.fromEntries(response.headers.entries())));
+
     const contentType = response.headers.get("content-type");
     if (!contentType || !contentType.includes("application/json")) {
       const text = await response.text();
@@ -35,12 +43,32 @@ const fetchJson = async (url: string, options: any) => {
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || errorData.error || `External API error: ${response.status}`);
+      
+      // Extract a string message from potentially complex error objects
+      let errorMessage = "Unknown Error";
+      if (typeof errorData.detail === 'string') {
+        errorMessage = errorData.detail;
+      } else if (typeof errorData.error === 'string') {
+        errorMessage = errorData.error;
+      } else if (errorData.error && typeof errorData.error === 'object') {
+        errorMessage = errorData.error.message || JSON.stringify(errorData.error);
+      } else if (errorData.detail && typeof errorData.detail === 'object') {
+        errorMessage = errorData.detail.message || JSON.stringify(errorData.detail);
+      } else {
+        errorMessage = JSON.stringify(errorData) || `External API error: ${response.status}`;
+      }
+
+      throw new Error(errorMessage);
     }
 
     return response.json();
-  } catch (err) {
-    if (err instanceof Error && err.name === 'FetchError') {
+  } catch (err: any) {
+    console.error('Raw fetch error:', err);
+    console.error('Error name:', err?.name);
+    console.error('Error message:', err?.message);
+    console.error('Error cause:', err?.cause);
+
+    if (err.name === 'FetchError') {
       throw new Error(`Network error connecting to ${url}: ${err.message}`);
     }
     throw err;

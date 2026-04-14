@@ -413,6 +413,7 @@ export default function App() {
       }
     } catch (error) {
       console.error("Sync failed:", error);
+      alert(`Sync failed: ${error instanceof Error ? error.message : "An unexpected error occurred during synchronization."}`);
     } finally {
       setIsSyncing(false);
     }

@@ -107,7 +107,7 @@ const fetchJson = async (url: string, options: any) => {
 
 // Simple Proxy for the Old Extraction API
 app.post("/api/proxy", async (req, res) => {
-  const { endpoint, apiKey, sql } = req.body;
+  const { endpoint, apiKey, ...payload } = req.body;
 
   try {
     if (!endpoint) {
@@ -126,7 +126,7 @@ app.post("/api/proxy", async (req, res) => {
       targetUrl = `${targetUrl.replace(/\/$/, "")}/api/execute`;
     }
     
-    // Step 1: Wake up the external API (Option 2: Wake then Retry)
+    // Step 1: Wake up the external API
     await warmUp(targetUrl);
 
     console.log(`Proxying request to: ${targetUrl}`);
@@ -138,7 +138,7 @@ app.post("/api/proxy", async (req, res) => {
         "Authorization": apiKey ? `Bearer ${apiKey}` : "",
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ sql })
+      body: JSON.stringify(payload) // Forward everything (prompt, sql, etc.)
     });
     console.log(`[Proxy] Request completed in ${Date.now() - fetchStart}ms`);
 

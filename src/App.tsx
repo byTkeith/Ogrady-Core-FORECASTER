@@ -240,64 +240,47 @@ export default function App() {
       let activeData = historicalData;
       let extractionLog = "";
 
-      // 1. SMART ROUTING: Convert prompt to SQL and fetch from Old API
+      // 1. SMART ROUTING: Send raw prompt to Old API
       if (liveSync && apiUrl) {
         try {
-          // Phase A: Generate SQL using the Old API's Semantic Logic
-          const sqlGenPrompt = `
-            ${getSemanticInstruction()}
-            User Prompt: "${userInput}"
-            Generate the SQL query to extract the necessary data from the MSQL database.
-          `;
-          
-          const sqlResponse = await ai.models.generateContent({
-            model: "gemini-3.1-pro-preview",
-            contents: sqlGenPrompt
+          // Phase A: Call the Backend Proxy with the raw user prompt
+          const proxyResponse = await fetch("/api/proxy", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              endpoint: apiUrl,
+              apiKey: externalApiKey,
+              prompt: userInput // Sending raw text directly
+            })
           });
 
-          const sqlMatch = sqlResponse.text?.match(/>>>SQL\s*([\s\S]*?)(?=(?:>>>)|$)/);
-          const generatedSql = sqlMatch ? sqlMatch[1].trim() : null;
-
-          if (generatedSql) {
-            // Phase B: Call the Backend Proxy to reach the Old API
-            const proxyResponse = await fetch("/api/proxy", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                endpoint: apiUrl,
-                apiKey: externalApiKey,
-                sql: generatedSql
-              })
-            });
-
-            if (proxyResponse.ok) {
-              const bridgeData = await proxyResponse.json();
-              const rawData = bridgeData.data || [];
-              
-              if (rawData.length === 0) {
-                extractionLog = "Extraction returned no records. Using dashboard fallback.";
-              } else {
-                // Phase C: Map to O'Grady CORE format
-                const mappingPrompt = `
-                  I have raw data from an external MSQL extraction API:
-                  ${JSON.stringify(rawData).substring(0, 3000)}
-
-                  Convert this into a STRICT JSON array of objects with "date" (YYYY-MM-DD) and "value" (number).
-                  Return ONLY the JSON array.
-                `;
-                const mappingResult = await ai.models.generateContent({
-                  model: "gemini-3.1-pro-preview",
-                  contents: mappingPrompt,
-                  config: { responseMimeType: "application/json" }
-                });
-                activeData = JSON.parse(mappingResult.text || "[]");
-                setHistoricalData(activeData);
-                extractionLog = `Successfully extracted ${activeData.length} records using generated SQL: ${generatedSql}`;
-              }
+          if (proxyResponse.ok) {
+            const bridgeData = await proxyResponse.json();
+            const rawData = bridgeData.data || [];
+            
+            if (rawData.length === 0) {
+              extractionLog = "Extraction returned no records. Using dashboard fallback.";
             } else {
-              const errorData = await proxyResponse.json();
-              extractionLog = `Extraction failed: ${errorData.error || proxyResponse.statusText}`;
+              // Phase B: Map to O'Grady CORE format
+              const mappingPrompt = `
+                I have raw data from an external MSQL extraction API:
+                ${JSON.stringify(rawData).substring(0, 3000)}
+
+                Convert this into a STRICT JSON array of objects with "date" (YYYY-MM-DD) and "value" (number).
+                Return ONLY the JSON array.
+              `;
+              const mappingResult = await ai.models.generateContent({
+                model: "gemini-3.1-pro-preview",
+                contents: mappingPrompt,
+                config: { responseMimeType: "application/json" }
+              });
+              activeData = JSON.parse(mappingResult.text || "[]");
+              setHistoricalData(activeData);
+              extractionLog = `Successfully extracted ${activeData.length} records using prompt-based generation.`;
             }
+          } else {
+            const errorData = await proxyResponse.json();
+            extractionLog = `Extraction failed: ${errorData.error || proxyResponse.statusText}`;
           }
         } catch (syncError) {
           console.error("Smart Routing Sync failed:", syncError);
@@ -367,15 +350,14 @@ export default function App() {
     }
     setIsSyncing(true);
     try {
-      // 1. Fetch raw data via proxy
-      const defaultSql = "SELECT TOP 100 TimeKey, ProductName, MonthlyNetQty as Qty, MonthlyNetRevenue as Revenue FROM v_AI_Forecasting_Feed ORDER BY TimeKey DESC";
+      // 1. Send default prompt to proxy
       const proxyResponse = await fetch("/api/proxy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           endpoint: apiUrl,
           apiKey: externalApiKey,
-          sql: defaultSql
+          prompt: "Select the last 100 records from v_AI_Forecasting_Feed with TimeKey, ProductName, MonthlyNetQty as Qty, and MonthlyNetRevenue as Revenue"
         })
       });
       

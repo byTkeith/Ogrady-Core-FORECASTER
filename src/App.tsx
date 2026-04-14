@@ -46,6 +46,38 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { format, addDays, subDays } from "date-fns";
+import { GoogleGenAI, Type } from "@google/genai";
+
+// Semantic Routing Logic (From Old API)
+const getSemanticInstruction = () => {
+  return `
+# O'GRADY PAINTS SEMANTIC ROUTING (VERSION 6.0)
+Use this to convert natural language into SQL for the MSQL Extraction API.
+
+## 1. TRANSACTIONAL ANALYSIS: [v_AI_Omnibus_Master_Truth]
+- PURPOSE: Use for Revenue, Profit, Sales Rep Performance, and Qty SOLD.
+- RULE: If the user asks "How much did we SELL," use this view.
+
+## 2. INVENTORY VALUATION: [v_AI_Inventory_History_Truth]
+- CORE METRICS: CurrentWarehouseSOH (Stock on Hand), Inventory_Worth_ExclVAT (Financial Value).
+- RULE: Use MAX(CurrentWarehouseSOH) when grouping by product to avoid double-counting.
+
+## 3. FORECASTING FEED: [v_AI_Forecasting_Feed]
+- Use for historical trends required for statistical analysis.
+- Columns: TimeKey, ProductName, MonthlyNetQty, MonthlyNetRevenue.
+
+## 4. RULES:
+- NO JOINS: Everything is pre-calculated.
+- SYNONYMS: Use LIKE '%...%' for ProductName.
+- FISCAL YEAR: March 1st - February 28th.
+
+OUTPUT FORMAT:
+>>>SQL
+SELECT ...
+>>>EXP
+Explanation...
+`;
+};
 
 // Mock data generator for initial state
 const generateMockData = (days: number) => {
@@ -131,19 +163,63 @@ export default function App() {
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [liveSync, setLiveSync] = useState(true);
 
+  // Initialize Gemini AI
+  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+
   const runForecast = async () => {
     setLoading(true);
     try {
-      const response = await fetch("/api/forecast", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          data: historicalData,
-          horizon: horizon,
-          context: `Manufacturing production data for ${productName}. High volume, large scale.`
-        })
+      const prompt = `
+        You are an expert Data Scientist and Actuarial Scientist specializing in large-scale manufacturing.
+        Perform a high-scale time-series forecast on the following manufacturing data:
+        ${JSON.stringify(historicalData)}
+
+        Context: Manufacturing production data for ${productName}. High volume, large scale.
+        Forecast Horizon: ${horizon} periods.
+
+        Tasks:
+        1. Apply Holt-Winters (Triple Exponential Smoothing) for immediate seasonal patterns.
+        2. Apply Facebook Prophet logic for holiday effects and multi-period seasonality.
+        3. Apply ARIMA (AutoRegressive Integrated Moving Average) logic to handle non-stationary data and autocorrelation in large-scale sales.
+        4. Apply LSTM (Long Short-Term Memory) and Octonus reasoning to capture long-term dependencies and complex non-linear patterns typical in high-volume manufacturing.
+        5. Provide a forecast for the next ${horizon} periods.
+        6. Provide manufacturing-specific insights:
+           - Suggested production/stock levels (CORE optimization).
+           - Pricing strategy for high-volume clients.
+           - Promotion suggestions for specific product lines.
+           - Impact of global supply chain trends or upcoming holidays.
+
+        Return the response in STRICT JSON format with the following structure:
+        {
+          "forecast": [
+            { "period": "...", "value": number, "lower": number, "upper": number }
+          ],
+          "decomposition": {
+            "trend": "...",
+            "seasonality": "...",
+            "holidays": "...",
+            "arima_lstm_insights": "..."
+          },
+          "insights": {
+            "stockLevel": "...",
+            "pricing": "...",
+            "promotions": "...",
+            "reasoning": "..."
+          },
+          "metrics": {
+            "mae": number,
+            "rmse": number
+          }
+        }
+      `;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: prompt,
+        config: { responseMimeType: "application/json" }
       });
-      const result = await response.json();
+
+      const result = JSON.parse(response.text || "{}");
       setForecastResult(result);
     } catch (error) {
       console.error("Forecast failed:", error);
@@ -161,25 +237,102 @@ export default function App() {
     setIsChatLoading(true);
 
     try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: userInput,
-          data: historicalData,
-          context: `Manufacturing production data for ${productName}. High volume, large scale.`,
-          syncWithOldApi: liveSync,
-          externalEndpoint: apiUrl,
-          externalApiKey: externalApiKey
-        })
-      });
-      const result = await response.json();
-      
-      // If new data was fetched, update the historical data state
-      if (result.mappedData) {
-        setHistoricalData(result.mappedData);
+      let activeData = historicalData;
+      let extractionLog = "";
+
+      // 1. SMART ROUTING: Convert prompt to SQL and fetch from Old API
+      if (liveSync && apiUrl) {
+        try {
+          // Phase A: Generate SQL using the Old API's Semantic Logic
+          const sqlGenPrompt = `
+            ${getSemanticInstruction()}
+            User Prompt: "${userInput}"
+            Generate the SQL query to extract the necessary data from the MSQL database.
+          `;
+          
+          const sqlResponse = await ai.models.generateContent({
+            model: "gemini-3.1-pro-preview",
+            contents: sqlGenPrompt
+          });
+
+          const sqlMatch = sqlResponse.text?.match(/>>>SQL\s*([\s\S]*?)(?=(?:>>>)|$)/);
+          const generatedSql = sqlMatch ? sqlMatch[1].trim() : null;
+
+          if (generatedSql) {
+            // Phase B: Call the Backend Proxy to reach the Old API
+            const proxyResponse = await fetch("/api/proxy", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                endpoint: apiUrl,
+                apiKey: externalApiKey,
+                sql: generatedSql
+              })
+            });
+
+            if (proxyResponse.ok) {
+              const bridgeData = await proxyResponse.json();
+              const rawData = bridgeData.data || [];
+              
+              // Phase C: Map to O'Grady CORE format
+              const mappingPrompt = `
+                I have raw data from an external MSQL extraction API:
+                ${JSON.stringify(rawData).substring(0, 3000)}
+
+                Convert this into a STRICT JSON array of objects with "date" (YYYY-MM-DD) and "value" (number).
+                Return ONLY the JSON array.
+              `;
+              const mappingResult = await ai.models.generateContent({
+                model: "gemini-3.1-pro-preview",
+                contents: mappingPrompt,
+                config: { responseMimeType: "application/json" }
+              });
+              activeData = JSON.parse(mappingResult.text || "[]");
+              setHistoricalData(activeData);
+              extractionLog = `Successfully extracted ${activeData.length} records using generated SQL: ${generatedSql}`;
+            }
+          }
+        } catch (syncError) {
+          console.error("Smart Routing Sync failed:", syncError);
+          extractionLog = "Failed to extract fresh data. Using dashboard fallback.";
+        }
       }
 
+      // 2. DEEP ANALYSIS: Use the ensemble models on the data
+      const analysisPrompt = `
+        You are the O'Grady CORE Forecaster. 
+        Models: ARIMA, Facebook Prophet, Octonus Deep-Trend.
+
+        Data Context: Manufacturing production data for ${productName}. High volume, large scale.
+        Current Data: ${JSON.stringify(activeData).substring(0, 3000)}
+        Extraction Log: ${extractionLog}
+        
+        Stakeholder Question: "${userInput}"
+
+        Tasks:
+        1. Analyze the data using the ensemble models.
+        2. Provide specific suggestions on Price, Stock, or Trends.
+        3. Reference the "Extraction Log" if data was freshly pulled.
+
+        Return in STRICT JSON:
+        {
+          "answer": "...",
+          "suggestedMove": "...",
+          "confidence": number,
+          "evidence": ["...", "..."],
+          "futureOutlook": "...",
+          "technicalNote": "Ensemble analysis summary"
+        }
+      `;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: analysisPrompt,
+        config: { responseMimeType: "application/json" }
+      });
+
+      const result = JSON.parse(response.text || "{}");
+      
       const botMsg: ChatMessage = { 
         role: 'bot', 
         content: result.answer,
@@ -194,7 +347,7 @@ export default function App() {
       setChatMessages(prev => [...prev, botMsg]);
     } catch (error) {
       console.error("Chat failed:", error);
-      setChatMessages(prev => [...prev, { role: 'bot', content: "I encountered an error analyzing the data. Please check your connection." }]);
+      setChatMessages(prev => [...prev, { role: 'bot', content: "I encountered an error analyzing the data. Please check your connection and API key." }]);
     } finally {
       setIsChatLoading(false);
     }
@@ -203,19 +356,39 @@ export default function App() {
   const syncFromOldApi = async () => {
     setIsSyncing(true);
     try {
-      const response = await fetch("/api/sync", {
+      // 1. Fetch raw data via proxy
+      const defaultSql = "SELECT TOP 100 TimeKey, ProductName, MonthlyNetQty as Qty, MonthlyNetRevenue as Revenue FROM v_AI_Forecasting_Feed ORDER BY TimeKey DESC";
+      const proxyResponse = await fetch("/api/proxy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           endpoint: apiUrl,
           apiKey: externalApiKey,
-          mappingInstructions: "Extract date and value fields from the MSQL extraction response for manufacturing production."
+          sql: defaultSql
         })
       });
-      const result = await response.json();
-      if (result.data && Array.isArray(result.data)) {
-        setHistoricalData(result.data);
-        // Automatically run forecast after sync
+      
+      const bridgeData = await proxyResponse.json();
+      const rawData = bridgeData.data || bridgeData;
+
+      // 2. Map data using Gemini
+      const mappingPrompt = `
+        I have raw data from an external MSQL extraction API:
+        ${JSON.stringify(rawData).substring(0, 4000)}
+
+        Convert this data into a STRICT JSON array of objects with "date" (YYYY-MM-DD) and "value" (number) fields.
+        Return ONLY the JSON array.
+      `;
+
+      const mappingResponse = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: mappingPrompt,
+        config: { responseMimeType: "application/json" }
+      });
+
+      const mappedData = JSON.parse(mappingResponse.text || "[]");
+      if (Array.isArray(mappedData)) {
+        setHistoricalData(mappedData);
         runForecast();
       }
     } catch (error) {

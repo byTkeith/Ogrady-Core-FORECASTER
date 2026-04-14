@@ -7,8 +7,9 @@ import { GoogleGenAI } from "@google/genai";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-async function startServer() {
-  const app = express();
+const app = express();
+
+async function setupServer() {
   const PORT = 3000;
 
   app.use(express.json());
@@ -339,9 +340,14 @@ Explanation...
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  // Only start the server if we're not in a serverless environment (like Vercel)
+  if (process.env.NODE_ENV !== "production" || !process.env.VERCEL) {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+  }
 }
 
-startServer();
+setupServer();
+
+export default app;

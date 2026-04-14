@@ -15,6 +15,36 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString(), environment: process.env.NODE_ENV });
 });
 
+// Helper to wake up a sleeping serverless function
+const warmUp = async (url: string) => {
+  try {
+    const origin = new URL(url).origin;
+    console.log(`[Warm-up] Sending pulse to wake up: ${origin}`);
+    
+    const start = Date.now();
+    // We hit the root or a health endpoint with a short timeout
+    await fetch(origin, { 
+      method: "GET", 
+      timeout: 3000, // Reduced from 5s
+      headers: { "User-Agent": "OGrady-Forecaster-Warmer" }
+    }).catch(() => {});
+    
+    const elapsed = Date.now() - start;
+    // If the pulse was fast (< 500ms), the server is already awake.
+    // If it was slow, it was likely waking up, so we give it a tiny bit more time.
+    const waitTime = elapsed < 500 ? 0 : Math.max(0, 1500 - elapsed);
+    
+    if (waitTime > 0) {
+      console.log(`[Warm-up] Waiting ${waitTime}ms for initialization...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    } else {
+      console.log(`[Warm-up] Server already awake, proceeding immediately.`);
+    }
+  } catch (e) {
+    console.warn("[Warm-up] Pulse failed, proceeding to main request:", e);
+  }
+};
+
 // Helper to fetch JSON safely and handle HTML error pages
 const fetchJson = async (url: string, options: any) => {
   console.log('Fetching URL:', url);
@@ -29,7 +59,7 @@ const fetchJson = async (url: string, options: any) => {
         "ngrok-skip-browser-warning": "true",
         "Accept": "application/json"
       },
-      timeout: 15000 // 15s timeout to stay within Vercel limits
+      timeout: 60000 // Increased to 60s for large manufacturing data extractions
     });
 
     console.log('Response status:', response.status);
@@ -96,8 +126,12 @@ app.post("/api/proxy", async (req, res) => {
       targetUrl = `${targetUrl.replace(/\/$/, "")}/api/execute`;
     }
     
+    // Step 1: Wake up the external API (Option 2: Wake then Retry)
+    await warmUp(targetUrl);
+
     console.log(`Proxying request to: ${targetUrl}`);
 
+    const fetchStart = Date.now();
     const bridgeData = await fetchJson(targetUrl, {
       method: "POST",
       headers: {
@@ -106,6 +140,7 @@ app.post("/api/proxy", async (req, res) => {
       },
       body: JSON.stringify({ sql })
     });
+    console.log(`[Proxy] Request completed in ${Date.now() - fetchStart}ms`);
 
     res.json(bridgeData);
   } catch (error) {

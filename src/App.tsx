@@ -274,22 +274,29 @@ export default function App() {
               const bridgeData = await proxyResponse.json();
               const rawData = bridgeData.data || [];
               
-              // Phase C: Map to O'Grady CORE format
-              const mappingPrompt = `
-                I have raw data from an external MSQL extraction API:
-                ${JSON.stringify(rawData).substring(0, 3000)}
+              if (rawData.length === 0) {
+                extractionLog = "Extraction returned no records. Using dashboard fallback.";
+              } else {
+                // Phase C: Map to O'Grady CORE format
+                const mappingPrompt = `
+                  I have raw data from an external MSQL extraction API:
+                  ${JSON.stringify(rawData).substring(0, 3000)}
 
-                Convert this into a STRICT JSON array of objects with "date" (YYYY-MM-DD) and "value" (number).
-                Return ONLY the JSON array.
-              `;
-              const mappingResult = await ai.models.generateContent({
-                model: "gemini-3.1-pro-preview",
-                contents: mappingPrompt,
-                config: { responseMimeType: "application/json" }
-              });
-              activeData = JSON.parse(mappingResult.text || "[]");
-              setHistoricalData(activeData);
-              extractionLog = `Successfully extracted ${activeData.length} records using generated SQL: ${generatedSql}`;
+                  Convert this into a STRICT JSON array of objects with "date" (YYYY-MM-DD) and "value" (number).
+                  Return ONLY the JSON array.
+                `;
+                const mappingResult = await ai.models.generateContent({
+                  model: "gemini-3.1-pro-preview",
+                  contents: mappingPrompt,
+                  config: { responseMimeType: "application/json" }
+                });
+                activeData = JSON.parse(mappingResult.text || "[]");
+                setHistoricalData(activeData);
+                extractionLog = `Successfully extracted ${activeData.length} records using generated SQL: ${generatedSql}`;
+              }
+            } else {
+              const errorData = await proxyResponse.json();
+              extractionLog = `Extraction failed: ${errorData.error || proxyResponse.statusText}`;
             }
           }
         } catch (syncError) {
@@ -354,6 +361,10 @@ export default function App() {
   };
 
   const syncFromOldApi = async () => {
+    if (!apiUrl) {
+      alert("Please provide the Old API Endpoint in the Source tab first.");
+      return;
+    }
     setIsSyncing(true);
     try {
       // 1. Fetch raw data via proxy
@@ -369,7 +380,16 @@ export default function App() {
       });
       
       const bridgeData = await proxyResponse.json();
+      
+      if (!proxyResponse.ok) {
+        throw new Error(bridgeData.error || `Server error: ${proxyResponse.status}`);
+      }
+
       const rawData = bridgeData.data || bridgeData;
+
+      if (!rawData || (Array.isArray(rawData) && rawData.length === 0)) {
+        throw new Error("The external API returned no data for the default query.");
+      }
 
       // 2. Map data using Gemini
       const mappingPrompt = `

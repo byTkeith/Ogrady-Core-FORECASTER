@@ -1,0 +1,5 @@
+{
+  "name": "O'Grady CORE Forecaster",
+  "description": "Interactive enterprise forecasting for large-scale manufacturing. Features a stakeholder chat interface with deep analysis using ARIMA, Prophet, and Octonus models for suggested moves on price, stock, and trends.",
+  "requestFramePermissions": []
+}

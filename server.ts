@@ -59,7 +59,7 @@ const fetchJson = async (url: string, options: any) => {
         "ngrok-skip-browser-warning": "true",
         "Accept": "application/json"
       },
-      timeout: 60000 // Increased to 60s for large manufacturing data extractions
+      timeout: 120000 // Increased to 120s for intensive AI & mathematical model computation
     });
 
     console.log('Response status:', response.status);

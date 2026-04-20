@@ -420,8 +420,8 @@ export default function App() {
                     <div className="bg-slate-50 border border-slate-100 rounded-2xl rounded-tl-none p-5 flex items-center gap-3 shadow-sm">
                       <RefreshCw className="w-5 h-5 animate-spin text-emerald-600" />
                       <div className="space-y-1">
-                        <span className="text-xs font-semibold text-slate-700 block">Octonus Engine Analyzing...</span>
-                        <span className="text-[10px] text-slate-500 block">Processing multi-model ensemble in ZAR</span>
+                        <span className="text-xs font-semibold text-slate-700 block">Waiting for data to be retrieved & processed by Backend Forecaster...</span>
+                        <span className="text-[10px] text-slate-500 block">Running ARIMA, Facebook Prophet & Holt-Winters (Objective Truth)</span>
                       </div>
                     </div>
                   </div>

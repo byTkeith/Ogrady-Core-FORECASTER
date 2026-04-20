@@ -17,7 +17,8 @@ import {
   Settings2,
   ChevronDown,
   ChevronUp,
-  Package
+  Package,
+  TrendingUp
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -27,38 +28,21 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { format, subDays } from "date-fns";
 import { GoogleGenAI } from "@google/genai";
 
-// Mock data generator for initial state
-const generateMockData = (days: number) => {
-  const data = [];
-  const baseValue = 5000; 
-  for (let i = days; i >= 0; i--) {
-    const date = subDays(new Date(), i);
-    const seasonality = Math.sin((days - i) * (2 * Math.PI / 7)) * 500;
-    const trend = (days - i) * 50;
-    const noise = Math.random() * 200;
-    data.push({
-      date: format(date, "yyyy-MM-dd"),
-      value: Math.round(baseValue + trend + seasonality + noise)
-    });
-  }
-  return data;
-};
+interface ProductAnalysis {
+  productName: string;
+  forecastExplanation: string;
+  strategicRecommendation: string;
+  projectedValues: string;
+}
 
 interface ChatMessage {
   role: 'user' | 'bot';
   content: string;
-  analysis?: {
-    suggestedMove: string;
-    confidence: number;
-    evidence: string[];
-    futureOutlook: string;
-    technicalNote: string;
-  };
+  productAnalyses?: ProductAnalysis[];
 }
 
 export default function App() {
-  const [historicalData, setHistoricalData] = useState(generateMockData(60));
-  const [productName, setProductName] = useState("Industrial Grade Steel Coil");
+  const [productName, setProductName] = useState("Internal Operations");
   
   // Persist API settings in localStorage
   const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('og_bridge_url') || "https://ogrady-core.vercel.app");
@@ -93,10 +77,10 @@ export default function App() {
     setIsChatLoading(true);
 
     try {
-      let activeData = historicalData;
       let extractionLog = "";
+      let backendForecasts: any = null;
 
-      // 1. SMART ROUTING: Send raw prompt to Old API
+      // 1. SMART ROUTING: Send raw prompt to Old API -> main.py
       if (liveSync && apiUrl) {
         try {
           const proxyResponse = await fetch("/api/proxy", {
@@ -105,68 +89,66 @@ export default function App() {
             body: JSON.stringify({
               endpoint: apiUrl,
               apiKey: externalApiKey,
-              prompt: userInput 
+              prompt: `[API_2_FORECAST_REQUEST] ${userInput}`,
+              // MARKER FOR MAIN.PY: Tells the python backend this requires forecasting
+              source: "API_2",
+              needs_forecasting: true
             })
           });
 
           if (proxyResponse.ok) {
             const bridgeData = await proxyResponse.json();
-            const rawData = bridgeData.data || [];
+            // main.py already cooked the data with Prophet/ARIMA/Holt-Winters
+            const rawData = bridgeData.data || bridgeData; 
             
-            if (rawData.length === 0) {
-              extractionLog = "Extraction returned no records. Using dashboard fallback.";
+            if (!rawData || (Array.isArray(rawData) && rawData.length === 0) || Object.keys(rawData).length === 0) {
+              extractionLog = "Extraction returned no records from the database.";
             } else {
-              const mappingPrompt = `
-                I have raw data from an external MSQL extraction API:
-                ${JSON.stringify(rawData).substring(0, 3000)}
-
-                Convert this into a STRICT JSON array of objects with "date" (YYYY-MM-DD) and "value" (number).
-                Return ONLY the JSON array.
-              `;
-              const mappingResult = await ai.models.generateContent({
-                model: "gemini-3.1-pro-preview",
-                contents: mappingPrompt,
-                config: { responseMimeType: "application/json" }
-              });
-              activeData = JSON.parse(mappingResult.text || "[]");
-              setHistoricalData(activeData);
-              extractionLog = `Successfully extracted ${activeData.length} records using prompt-based generation.`;
+              backendForecasts = rawData;
+              extractionLog = `Successfully retrieved computed forecast data directly from the Python backend (main.py).`;
             }
           } else {
             const errorData = await proxyResponse.json();
-            extractionLog = `Extraction failed: ${errorData.error || proxyResponse.statusText}`;
+            extractionLog = `External Extraction failed: ${errorData.error || proxyResponse.statusText}`;
           }
         } catch (syncError) {
-          console.error("Smart Routing Sync failed:", syncError);
-          extractionLog = "Failed to extract fresh data. Using dashboard fallback.";
+          console.error("Extraction Sync failed:", syncError);
+          extractionLog = "Connection to Core API failed via proxy.";
         }
       }
 
-      // 2. DEEP ANALYSIS: Use the ensemble models on the data
+      // 2. EXPLANATORY AI LAYER: Analyzing the Backend's Math
       const analysisPrompt = `
-        You are the O'Grady CORE Forecaster. 
-        Models: ARIMA, Facebook Prophet, Octonus Deep-Trend.
+        You are the O'Grady CORE Chief Analyst (South African division).
 
-        Data Context: Manufacturing production data for ${productName}. High volume, large scale.
-        Current Data: ${JSON.stringify(activeData).substring(0, 3000)}
-        Extraction Log: ${extractionLog}
-        
-        Stakeholder Question: "${userInput}"
+        The stakeholder asked: "${userInput}"
+        System Log: ${extractionLog}
+
+        CRITICAL ARCHITECTURAL NOTE:
+        The Python backend (main.py) has already executed the rigorous mathematical models (ARIMA, Facebook Prophet, Holt-Winters) and returned the fully computed forecast payload below.
+        YOU MUST NOT HALLUCINATE OR GUESS THE NUMBERS. You must ONLY interpret and format the exact mathematical projections provided by the backend.
+
+        Python Backend Computed Forecast Payload:
+        ${JSON.stringify(backendForecasts).substring(0, 10000)}
 
         Tasks:
-        1. Analyze the data using the ensemble models.
-        2. Provide specific suggestions on Price, Stock, or Trends.
-        3. Reference the "Extraction Log" if data was freshly pulled.
-        4. ALL CURRENCY REFERENCES MUST BE IN SOUTH AFRICAN RAND (R).
+        1. Read the provided forecast payload from the backend. 
+        2. Format the backend's numbers into a clear, product-by-product breakdown. Quote the exact forecasted numbers provided in the payload.
+        3. Explain to the user what the backend models detected based on the numbers (e.g., seasonality, trends, expected growth/drop).
+        4. Give a highly specific strategic recommendation per product based on the backend's projections.
+        5. ALL CURRENCY REFERENCES MUST BE IN ZAR (R).
 
         Return in STRICT JSON:
         {
-          "answer": "...",
-          "suggestedMove": "...",
-          "confidence": number,
-          "evidence": ["...", "..."],
-          "futureOutlook": "...",
-          "technicalNote": "Ensemble analysis summary"
+          "executiveSummary": "Overall robust answer to the stakeholder based on the backend data.",
+          "productAnalyses": [
+            {
+              "productName": "...",
+              "forecastExplanation": "Specifically what the Prophet/ARIMA models indicate based on the payload...",
+              "strategicRecommendation": "Specific transactional/pricing move",
+              "projectedValues": "Quote the explicit arrays/numbers from the backend forecast payload."
+            }
+          ]
         }
       `;
 
@@ -180,14 +162,8 @@ export default function App() {
       
       const botMsg: ChatMessage = { 
         role: 'bot', 
-        content: result.answer,
-        analysis: {
-          suggestedMove: result.suggestedMove,
-          confidence: result.confidence,
-          evidence: result.evidence,
-          futureOutlook: result.futureOutlook,
-          technicalNote: result.technicalNote
-        }
+        content: result.executiveSummary || "Here is the comprehensive product-level forecast breakdown:",
+        productAnalyses: result.productAnalyses || []
       };
       setChatMessages(prev => [...prev, botMsg]);
     } catch (error) {
@@ -212,7 +188,9 @@ export default function App() {
         body: JSON.stringify({
           endpoint: apiUrl,
           apiKey: externalApiKey,
-          prompt: "Select the last 100 records from v_AI_Forecasting_Feed with TimeKey, ProductName, MonthlyNetQty as Qty, and MonthlyNetRevenue as Revenue"
+          prompt: "Select the last 100 records from v_AI_Forecasting_Feed with TimeKey, ProductName, MonthlyNetQty as Qty, and MonthlyNetRevenue as Revenue",
+          source: "API_2",
+          needs_forecasting: true
         })
       });
       
@@ -244,10 +222,9 @@ export default function App() {
 
       const mappedData = JSON.parse(mappingResponse.text || "[]");
       if (Array.isArray(mappedData)) {
-        setHistoricalData(mappedData);
         setChatMessages(prev => [...prev, { 
           role: 'bot', 
-          content: `Data synchronization complete. I've loaded ${mappedData.length} historical records for ${productName}. How can I help you analyze this scale today?` 
+          content: `Data synchronization complete. I've analyzed ${mappedData.length} records. How can I assist you with the CORE Intelligence analysis?` 
         }]);
       }
     } catch (error) {
@@ -398,39 +375,40 @@ export default function App() {
                       </div>
                       <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
                       
-                      {msg.analysis && (
+                      {msg.productAnalyses && msg.productAnalyses.length > 0 && (
                         <div className="mt-6 pt-6 border-t border-slate-200 space-y-5">
-                          <div className="bg-white p-4 rounded-xl border border-emerald-100 space-y-3 shadow-sm">
-                            <div className="flex items-center justify-between">
-                              <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-widest">Suggested Move</span>
-                              <Badge className="bg-emerald-600 text-[10px] h-5">{msg.analysis.confidence}% Confidence</Badge>
-                            </div>
-                            <p className="text-sm font-bold text-emerald-900">{msg.analysis.suggestedMove}</p>
-                          </div>
-                          
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="space-y-2">
-                              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Evidence & Trends</span>
-                              <ul className="space-y-2">
-                                {msg.analysis.evidence.map((ev, j) => (
-                                  <li key={j} className="text-[11px] text-slate-600 flex items-start gap-2">
-                                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />
-                                    {ev}
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
+                          {msg.productAnalyses.map((prod, j) => (
+                            <div key={j} className="bg-white p-5 rounded-xl border border-emerald-100 shadow-[0_2px_10px_-3px_rgba(16,185,129,0.1)] space-y-4">
+                              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                                <span className="text-sm font-bold text-emerald-900 uppercase tracking-wide">{prod.productName}</span>
+                                <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-200 border-none px-2 rounded-md font-mono text-[9px] shadow-sm">
+                                  Backend Compiled
+                                </Badge>
+                              </div>
+                              
+                              <div className="space-y-1.5">
+                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest shrink-0">Math Projection</span>
+                                <p className="text-xs font-mono text-emerald-800 bg-emerald-50 rounded-md p-2.5 border border-emerald-100">
+                                  {prod.projectedValues}
+                                </p>
+                              </div>
 
-                            <div className="space-y-2">
-                              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Future Outlook (90d)</span>
-                              <p className="text-[11px] text-slate-600 italic leading-relaxed">{msg.analysis.futureOutlook}</p>
-                            </div>
-                          </div>
+                              <div className="space-y-1.5">
+                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest shrink-0">Model Reasoning</span>
+                                <p className="text-xs text-slate-700 leading-relaxed bg-slate-50 p-3 rounded-md">
+                                  {prod.forecastExplanation}
+                                </p>
+                              </div>
 
-                          <div className="pt-2 flex items-center gap-2 text-[10px] text-slate-400 font-mono border-t border-slate-100">
-                            <History className="w-3 h-3" />
-                            {msg.analysis.technicalNote}
-                          </div>
+                              <div className="space-y-1.5 pt-2">
+                                <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest shrink-0">Strategic Move</span>
+                                <p className="text-sm font-semibold text-emerald-950 flex items-start gap-2">
+                                  <TrendingUp className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
+                                  {prod.strategicRecommendation}
+                                </p>
+                              </div>
+                            </div>
+                          ))}
                         </div>
                       )}
                     </div>

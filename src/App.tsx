@@ -71,8 +71,7 @@ export default function App() {
   const [productName, setProductName] = useState("Internal Operations");
   
   // Persist API settings in localStorage
-  const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('og_bridge_url') || "https://ogrady-core.vercel.app");
-  const [externalApiKey, setExternalApiKey] = useState(() => localStorage.getItem('og_bridge_key') || "");
+  const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('og_bridge_url') || "http://localhost:8000");
   const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('og_gemini_key') || "");
   const [showSettings, setShowSettings] = useState(false);
   
@@ -81,20 +80,13 @@ export default function App() {
   }, [apiUrl]);
 
   useEffect(() => {
-    localStorage.setItem('og_bridge_key', externalApiKey);
-  }, [externalApiKey]);
-
-  useEffect(() => {
     localStorage.setItem('og_gemini_key', geminiApiKey);
   }, [geminiApiKey]);
 
-  const [isSyncing, setIsSyncing] = useState(false);
-  
   // Chat State
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [userInput, setUserInput] = useState("");
   const [isChatLoading, setIsChatLoading] = useState(false);
-  const [liveSync, setLiveSync] = useState(true);
 
   const handleSendMessage = async () => {
     if (!userInput.trim()) return;
@@ -115,41 +107,36 @@ export default function App() {
       let extractionLog = "";
       let backendForecasts: any = null;
 
-      // 1. SMART ROUTING: Send raw prompt to Old API -> main.py
-      if (liveSync && apiUrl) {
-        try {
-          const proxyResponse = await fetch("/api/proxy", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              endpoint: apiUrl,
-              apiKey: externalApiKey,
-              prompt: `[API_2_FORECAST_REQUEST] ${userInput}`,
-              // MARKER FOR MAIN.PY: Tells the python backend this requires forecasting
-              source: "API_2",
-              needs_forecasting: true
-            })
-          });
+      // 1. SMART ROUTING: Send raw prompt to Node Proxy -> main.py
+      try {
+        const proxyResponse = await fetch("/api/proxy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+           endpoint: apiUrl,
+           geminiApiKey: geminiApiKey,
+           prompt: userInput
+          })
+        });
 
-          if (proxyResponse.ok) {
-            const bridgeData = await proxyResponse.json();
-            // main.py already cooked the data with Prophet/ARIMA/Holt-Winters
-            const rawData = bridgeData.data || bridgeData; 
-            
-            if (!rawData || (Array.isArray(rawData) && rawData.length === 0) || Object.keys(rawData).length === 0) {
-              extractionLog = "Extraction returned no records from the database.";
-            } else {
-              backendForecasts = rawData;
-              extractionLog = `Successfully retrieved computed forecast data directly from the Python backend (main.py).`;
-            }
+        if (proxyResponse.ok) {
+          const bridgeData = await proxyResponse.json();
+          // main.py already cooked the data with Prophet/ARIMA/Holt-Winters
+          const rawData = bridgeData.data || bridgeData; 
+          
+          if (!rawData || (Array.isArray(rawData) && rawData.length === 0) || Object.keys(rawData).length === 0) {
+            extractionLog = "Extraction returned no records from the database.";
           } else {
-            const errorData = await proxyResponse.json();
-            extractionLog = `External Extraction failed: ${errorData.error || proxyResponse.statusText}`;
+            backendForecasts = rawData;
+            extractionLog = `Successfully retrieved computed forecast data directly from the Python backend (main.py).`;
           }
-        } catch (syncError) {
-          console.error("Extraction Sync failed:", syncError);
-          extractionLog = "Connection to Core API failed via proxy.";
+        } else {
+          const errorData = await proxyResponse.json();
+          extractionLog = `External Extraction failed: ${errorData.error || proxyResponse.statusText}`;
         }
+      } catch (syncError) {
+        console.error("Extraction Sync failed:", syncError);
+        extractionLog = "Connection to Core API failed via proxy.";
       }
 
       // 2. EXPLANATORY AI LAYER: Analyzing the Backend's Math
@@ -219,74 +206,6 @@ export default function App() {
     }
   };
 
-  const syncFromOldApi = async () => {
-    if (!apiUrl) {
-      alert("Please provide the Old API Endpoint in the Source settings first.");
-      setShowSettings(true);
-      return;
-    }
-    if (!geminiApiKey) {
-      alert("Please provide the Gemini API Key in the Source settings first.");
-      setShowSettings(true);
-      return;
-    }
-    const ai = new GoogleGenAI({ apiKey: geminiApiKey });
-
-    setIsSyncing(true);
-    try {
-      const proxyResponse = await fetch("/api/proxy", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          endpoint: apiUrl,
-          apiKey: externalApiKey,
-          prompt: "Select the last 100 records from v_AI_Forecasting_Feed with TimeKey, ProductName, MonthlyNetQty as Qty, and MonthlyNetRevenue as Revenue",
-          source: "API_2",
-          needs_forecasting: true
-        })
-      });
-      
-      const bridgeData = await proxyResponse.json();
-      
-      if (!proxyResponse.ok) {
-        throw new Error(bridgeData.error || `Server error: ${proxyResponse.status}`);
-      }
-
-      const rawData = bridgeData.data || bridgeData;
-
-      if (!rawData || (Array.isArray(rawData) && rawData.length === 0)) {
-        throw new Error("The external API returned no data for the default query.");
-      }
-
-      const mappingPrompt = `
-        I have raw data from an external MSQL extraction API:
-        ${JSON.stringify(rawData).substring(0, 4000)}
-
-        Convert this data into a STRICT JSON array of objects with "date" (YYYY-MM-DD) and "value" (number) fields.
-        Return ONLY the JSON array.
-      `;
-
-      const mappingResponse = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
-        contents: mappingPrompt,
-        config: { responseMimeType: "application/json" }
-      });
-
-      const mappedData = JSON.parse(mappingResponse.text || "[]");
-      if (Array.isArray(mappedData)) {
-        setChatMessages(prev => [...prev, { 
-          role: 'bot', 
-          content: `Data synchronization complete. I've analyzed ${mappedData.length} records. How can I assist you with the CORE Intelligence analysis?` 
-        }]);
-      }
-    } catch (error) {
-      console.error("Sync failed:", error);
-      alert(`Sync failed: ${error instanceof Error ? error.message : "An unexpected error occurred during synchronization."}`);
-    } finally {
-      setIsSyncing(false);
-    }
-  };
-
   return (
     <div className="min-h-screen bg-[#F0F4F0] text-[#1A2F1A] font-sans p-4 md:p-8">
       <div className="max-w-4xl mx-auto space-y-6">
@@ -309,14 +228,6 @@ export default function App() {
               Source Settings
               {showSettings ? <ChevronUp className="w-4 h-4 ml-2" /> : <ChevronDown className="w-4 h-4 ml-2" />}
             </Button>
-            <Button 
-              onClick={syncFromOldApi} 
-              disabled={isSyncing}
-              className="bg-emerald-600 hover:bg-emerald-700 text-white shadow-md border-none"
-            >
-              {isSyncing ? <RefreshCw className="w-4 h-4 animate-spin mr-2" /> : <RefreshCw className="w-4 h-4 mr-2" />}
-              Sync Data
-            </Button>
           </div>
         </header>
 
@@ -335,17 +246,7 @@ export default function App() {
                     value={apiUrl} 
                     onChange={(e) => setApiUrl(e.target.value)}
                     className="font-mono text-xs border-emerald-100"
-                    placeholder="https://ogrady-core.vercel.app"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-[10px] font-bold text-emerald-700 uppercase">Old API Key</label>
-                  <Input 
-                    type="password"
-                    value={externalApiKey} 
-                    onChange={(e) => setExternalApiKey(e.target.value)}
-                    className="font-mono text-xs border-emerald-100"
-                    placeholder="Bearer token..."
+                    placeholder="http://localhost:8000"
                   />
                 </div>
                 <div className="space-y-2">
@@ -371,17 +272,6 @@ export default function App() {
                     onChange={(e) => setProductName(e.target.value)}
                     className="border-emerald-100 text-emerald-900 font-medium"
                   />
-                </div>
-                <div className="flex items-center gap-2 pt-4">
-                  <div className="flex items-center gap-2 bg-emerald-50 px-3 py-2 rounded-md border border-emerald-100 w-full justify-between">
-                    <span className="text-xs font-bold uppercase tracking-wider text-emerald-700">Live Sync Mode</span>
-                    <input 
-                      type="checkbox" 
-                      checked={liveSync} 
-                      onChange={(e) => setLiveSync(e.target.checked)}
-                      className="w-4 h-4 accent-emerald-600 cursor-pointer"
-                    />
-                  </div>
                 </div>
               </div>
             </div>

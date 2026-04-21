@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import fetch from "node-fetch";
+import { GoogleGenAI } from "@google/genai";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -9,155 +10,117 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(express.json());
 
-// Health check for Vercel deployment verification
-app.get("/api/health", (req, res) => {
-  console.log("Health check requested");
-  res.json({ status: "ok", timestamp: new Date().toISOString(), environment: process.env.NODE_ENV });
-});
+// --- EXACT SYSTEM INSTRUCTIONS PROVIDED BY YOU ---
+const getSystemInstruction = (): string => {
+  return `
+# ROLE: SENIOR STATISTICAL DATA ARCHITECT
 
-// Helper to wake up a sleeping serverless function
-const warmUp = async (url: string) => {
-  try {
-    const origin = new URL(url).origin;
-    console.log(`[Warm-up] Sending pulse to wake up: ${origin}`);
-    
-    const start = Date.now();
-    // We hit the root or a health endpoint with a short timeout
-    await fetch(origin, { 
-      method: "GET", 
-      timeout: 3000, // Reduced from 5s
-      headers: { "User-Agent": "OGrady-Forecaster-Warmer" }
-    }).catch(() => {});
-    
-    const elapsed = Date.now() - start;
-    // If the pulse was fast (< 500ms), the server is already awake.
-    // If it was slow, it was likely waking up, so we give it a tiny bit more time.
-    const waitTime = elapsed < 500 ? 0 : Math.max(0, 1500 - elapsed);
-    
-    if (waitTime > 0) {
-      console.log(`[Warm-up] Waiting ${waitTime}ms for initialization...`);
-      await new Promise(resolve => setTimeout(resolve, waitTime));
-    } else {
-      console.log(`[Warm-up] Server already awake, proceeding immediately.`);
-    }
-  } catch (e) {
-    console.warn("[Warm-up] Pulse failed, proceeding to main request:", e);
-  }
+## 1. THE PROPHET PROTOCOL
+You are harvesting data for a Facebook Prophet / ARIMA model.
+- **MANDATORY VIEW**: [v_AI_Forecasting_Engine_Granular]
+- **COLUMN CONVENTION**: You MUST use [ds] for the date and [y] for the quantity. This is the required format for the statistical engine.
+- **SORTING RULE**: You MUST [ORDER BY ProductName, ds ASC]. This ensures the time-series is segmented product-by-product.
+
+## 2. AGGREGATION RULES
+- **WEEKLY FORECAST**: 
+  SELECT DATEADD(WEEK, DATEDIFF(WEEK, 0, ds), 0) AS ds, ProductName, SUM(y) AS y, MAX(CurrentStockOnHand) AS Stock
+  FROM v_AI_Forecasting_Engine_Granular
+  WHERE ds >= DATEADD(YEAR, -3, GETDATE())
+  GROUP BY DATEADD(WEEK, DATEDIFF(WEEK, 0, ds), 0), ProductName
+  ORDER BY ProductName, ds ASC;
+
+## 3. SEMANTIC STANDARDS
+- All Revenue and Quantity is pre-calculated for Five-Nines accuracy.
+- Branch filtering uses [BranchName] with LIKE '%...%'.
+- Do NOT perform any math (AVG/MIN/MAX) on the 'y' value. Just return the series.
+
+## 4. OUTPUT FORMAT
+>>>SQL
+{Your SQL}
+>>>EXP
+{Identify the series frequency: Weekly/Daily}
+>>>STRAT
+{High-level context for the CEO}
+>>>VIZ
+line
+>>>X
+ds
+>>>Y
+y
+`;
 };
 
-// Helper to fetch JSON safely and handle HTML error pages
-const fetchJson = async (url: string, options: any) => {
-  console.log('Fetching URL:', url);
-  // Avoid logging the full options if it contains sensitive API keys, but log the structure
-  console.log('Fetch method:', options.method);
-  
+// --- API PROXY & LOCAL SQL GENERATOR ---
+app.post("/api/proxy", async (req, res) => {
+  const { endpoint, geminiApiKey, prompt } = req.body;
+
   try {
-    const response = await fetch(url, {
-      ...options,
-      headers: {
-        ...options.headers,
-        "ngrok-skip-browser-warning": "true",
+    if (!endpoint) return res.status(400).json({ error: "External API endpoint is required." });
+    if (!geminiApiKey) return res.status(400).json({ error: "Gemini API key is required." });
+    
+    // Ensure properly formatted target URL
+    let targetUrl = endpoint;
+    if (!targetUrl.includes("/api/")) targetUrl = `${targetUrl.replace(/\/$/, "")}/api/execute`;
+
+    // 1. GENERATE SQL LOCALLY USING GEMINI
+    console.log(`[Local API 2 Server] Translating User Prompt into SQL...`);
+    const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+    
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-pro-preview",
+      contents: prompt,
+      config: {
+        systemInstruction: getSystemInstruction()
+      }
+    });
+
+    const aiRaw = response.text || "";
+    const sqlMatch = aiRaw.match(/>>>SQL\s*([\s\S]*?)(?=\s*>>>|$)/);
+    const sqlToExecute = sqlMatch ? sqlMatch[1].trim() : "";
+
+    if (!sqlToExecute) {
+      throw new Error("Gemini failed to format output with >>>SQL tags.");
+    }
+
+    console.log(`[Local API 2 Server] SQL Generated successfully: \n${sqlToExecute}`);
+    console.log(`[Local API 2 Server] Sending directly to main.py at: ${targetUrl}`);
+
+    // 2. SEND RAW SQL TO MAIN.PY WITH INFINITE TIMEOUT
+    const fetchStart = Date.now();
+    const bridgeRes = await fetch(targetUrl, {
+      method: "POST",
+      headers: { 
+        "Content-Type": "application/json",
         "Accept": "application/json"
       },
-      timeout: 120000 // Increased to 120s for intensive AI & mathematical model computation
+      // Timeout is effectively 10 minutes, allowing Prophet to calculate safely
+      timeout: 600000, 
+      body: JSON.stringify({
+         sql: sqlToExecute,               
+         source: "API_2_FORECASTER", 
+         needs_forecasting: true
+      }) 
     });
 
-    console.log('Response status:', response.status);
-    console.log('Response headers:', JSON.stringify(Object.fromEntries(response.headers.entries())));
-
-    const contentType = response.headers.get("content-type");
-    if (!contentType || !contentType.includes("application/json")) {
-      const text = await response.text();
-      throw new Error(`External API at ${url} returned non-JSON response (${contentType}). Status: ${response.status}. Body: ${text.substring(0, 100)}`);
+    if (!bridgeRes.ok) {
+        throw new Error(`main.py threw an error: ${bridgeRes.status} ${bridgeRes.statusText}`);
     }
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      
-      // Extract a string message from potentially complex error objects
-      let errorMessage = "Unknown Error";
-      if (typeof errorData.detail === 'string') {
-        errorMessage = errorData.detail;
-      } else if (typeof errorData.error === 'string') {
-        errorMessage = errorData.error;
-      } else if (errorData.error && typeof errorData.error === 'object') {
-        errorMessage = errorData.error.message || JSON.stringify(errorData.error);
-      } else if (errorData.detail && typeof errorData.detail === 'object') {
-        errorMessage = errorData.detail.message || JSON.stringify(errorData.detail);
-      } else {
-        errorMessage = JSON.stringify(errorData) || `External API error: ${response.status}`;
-      }
-
-      throw new Error(errorMessage);
-    }
-
-    return response.json();
-  } catch (err: any) {
-    console.error('Raw fetch error:', err);
-    console.error('Error name:', err?.name);
-    console.error('Error message:', err?.message);
-    console.error('Error cause:', err?.cause);
-
-    if (err.name === 'FetchError') {
-      throw new Error(`Network error connecting to ${url}: ${err.message}`);
-    }
-    throw err;
-  }
-};
-
-// Simple Proxy for the Old Extraction API
-app.post("/api/proxy", async (req, res) => {
-  const { endpoint, apiKey, ...payload } = req.body;
-
-  try {
-    if (!endpoint) {
-      return res.status(400).json({ error: "External API endpoint is required." });
-    }
-
-    // Ensure we have a valid URL
-    let targetUrl = endpoint;
-    try {
-      new URL(endpoint);
-    } catch (e) {
-      return res.status(400).json({ error: `Invalid endpoint URL: ${endpoint}` });
-    }
-
-    if (!targetUrl.includes("/api/")) {
-      targetUrl = `${targetUrl.replace(/\/$/, "")}/api/execute`;
-    }
-    
-    // Step 1: Wake up the external API
-    await warmUp(targetUrl);
-
-    console.log(`Proxying request to: ${targetUrl}`);
-
-    const fetchStart = Date.now();
-    const bridgeData = await fetchJson(targetUrl, {
-      method: "POST",
-      headers: {
-        "Authorization": apiKey ? `Bearer ${apiKey}` : "",
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload) // Forward everything (prompt, sql, etc.)
-    });
-    console.log(`[Proxy] Request completed in ${Date.now() - fetchStart}ms`);
+    const bridgeData = await bridgeRes.json();
+    console.log(`[Local API 2 Server] Request completed successfully in ${Date.now() - fetchStart}ms`);
 
     res.json(bridgeData);
   } catch (error) {
-    console.error("Proxy error:", error);
-    const message = error instanceof Error ? error.message : "Failed to connect to the external API.";
-    
-    // Return a more descriptive error to the frontend
+    console.error("Local Proxy Error:", error);
     res.status(500).json({ 
-      error: message,
-      details: "This error usually occurs when the external API is unreachable, returns an invalid response, or times out.",
-      endpoint: endpoint
+        error: "Failed the backend pipeline", 
+        details: error instanceof Error ? error.message : "Unexpected backend error" 
     });
   }
 });
 
+// --- SERVER INSTANTIATION ---
 async function startServer() {
-  // Static serving for production
   if (process.env.NODE_ENV === "production") {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
@@ -165,7 +128,6 @@ async function startServer() {
       res.sendFile(path.join(distPath, "index.html"));
     });
   } else {
-    // Vite middleware for development so localhost:3000 serves the React UI
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -174,11 +136,10 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  // Only start the server if we're not in a serverless environment
   if (process.env.NODE_ENV !== "production" || !process.env.VERCEL) {
     const PORT = 3000;
     app.listen(PORT, "0.0.0.0", () => {
-      console.log(`Server running on http://localhost:${PORT}`);
+      console.log(`[Local API 2 Server] Running successfully on http://localhost:${PORT}`);
     });
   }
 }
